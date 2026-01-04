@@ -209,21 +209,21 @@ errores <- las_check(teselas, print = TRUE)
 
 # 4. Cálculo del MDE
 # 4.1. Listamos los algoritmos a emplear
-algoritmos <- list(
+algoritmos_mde <- list(
   tin= tin(),
-  idw = knnidw(),
-  kri = kriging()
+  # idw = knnidw(),
+  # kri = kriging()
 )
 
 # 4.2. Cálculo de los MDEs mediante una función anónima
 mde <- lapply(
-  names(algoritmos),
+  names(algoritmos_mde),
   function(nombre) {
     # Cálculo del MDE
     mde <- lidR::rasterize_terrain(
       teselas,
       res = 1,
-      algorithm = algoritmos[[nombre]],
+      algorithm = algoritmos_mde[[nombre]],
       pkg = "terra"
     )
 
@@ -255,7 +255,7 @@ mde <- lapply(
 )
 
 # 4.3. Nombramos los elementos de la lista
-names(mde) <- names(algoritmos)
+names(mde) <- names(algoritmos_mde)
 ```
 
 #### MDS
@@ -298,7 +298,11 @@ Existen principalmente tres métodos para poder obtener el MDS(n):
 
     De nuevo, se puede recurrir a la función ya mencionada para calcular el CHM: `chm <- rasterize_canopy(ctg, res = 0.5, algorithm = dsmtin())`. Este método, al igual que el anterior, puede presentar resultados poco coherentes cuando faltan muchos puntos de la nube (como por ejemplo en terrenos que presentan muchas oquedades o masas de agua). En este caso, la solución pasa por configurar el parámetro `max_edge`, que define el número máximo de bordes de un triángulo permitos en una *triangulación de Delaunay*. Por defecto, el valor establecido es `0`, lo que significa que ningún triángulo es eliminado. Por otro lado, con un valor de (por ejemplo) `8` (`chm <- rasterize_canopy(ctg, res = 0.5, algorithm = dsmtin(max_edge = 8))`), los triángulos que contengan bordes con una longitud mayor a 8 serán eliminados (no serán tenidos en cuenta) de la triangulación.
 
--   **Algoritmo sin huecos (*pit-free algortihm*)**: Este algorimo más avanzado (de los que veremos), y evita la generación de huecos (píxeles sin valor de la variable) durante su cálculo, la contrario que los anteriores métodos (los cuáles requerían un postprocesamiento para poder solventar este problema).
+-   **Algoritmo sin huecos (*pit-free algortihm*)**: Este es el algoritmo más avanzado (de los que veremos), y evita la generación de huecos (píxeles sin valor de la variable) durante su cálculo, al contrario que los anteriores métodos (los cuáles requerían un "postprocesamiento" para poder solventar este problema).
+
+    El primer paso consiste en la generación de una serie de *MDSs parciales* a partir de los distintos retornos de cada una de las huellas (puntos geográficos) de las pasadas del sensor. Es decir, para una serie de alturas especificadas, cuya elección depende, en principio, del criterio experto (que conoce la zona de estudio y la vegetación de esta), se genera un MDS para cada uno de dichos intervalos (en nuestro caso, emplearemos los definidos por @khosravipour2014 en su artículo).
+
+    El segundo paso es combinar todos los CHMs, extrayendo el valor más alto de todos los CHMs calculados para la posición *x* e *y* de ráster resultante [@khosravipour2014].
 
 ```{r}
 #| label: mds
@@ -309,14 +313,15 @@ Existen principalmente tres métodos para poder obtener el MDS(n):
 
 # 1.2. Aplicamos de forma iterativa la normalización en cada caso
 teselas_n <- lapply(
-  names(algoritmos),
+  names(algoritmos_mde),
   function(nombre) {
-    opt_output_files(teselas) <- paste0(here::here(paste0("data/lidar/lidar2/norm/", nombre, "/", nombre, "_", "/")), "{ORIGINALFILENAME}")
+    opt_output_files(teselas) <- paste0(here::here(paste0("data/lidar/lidar2/norm/", nombre, "/", nombre, "_", "/")), "{ORIGINALFILENAME}") # Configurar salida del catálogo
+    opt_laz_compression(teselas) # Configurar formato de salida
 
     # Cálculo del MDE
     teselas_n <- lidR::normalize_height(
       teselas,
-      algoritmos[[nombre]]
+      algoritmos_mde[[nombre]]
     )
 
     # Lista con los resultados
@@ -325,11 +330,81 @@ teselas_n <- lapply(
 )
 
 # 2. Cálculo del CHM
-# 2.1. Point-to-raster
+# 2.1. Cargamos las teselas normalizadas
+# 2.1.1. Listamos las teselas normalizadas
+rutas_teselas_n <- list.files(
+  path = "data/lidar/lidar2/norm/tin",
+  pattern = "^tin.*IRC\\.las$",
+  full.names = TRUE
+)
 
-# 2.2. Triangulación
+# 2.1.2. Cargamos las teselas como un 'catalogo'
+teselas_n <- readLAScatalog(
+  folder = rutas_teselas_n, 
+  select = "xyzcrn", 
+  filter = "-drop_z_below 0"
+)
 
-# 2.3. Algoritmo sin huecos
+# 2.1.3. Validación del catálogo
+errores_tin_n <- las_check(teselas_n, print = TRUE)
+
+# 2.2. Especificamos los algoritmos a emplear, así como sus atributos
+algoritmos_mds <- list(
+  p2r = p2r(
+    subcircle = 0.2, 
+    na.fill = NA
+  ),
+  tin = dsmtin(
+    max_edge = 8, 
+    highest = FALSE
+  ),
+  pitfree = pitfree(
+    thresholds = c(0, 2, 5, 10, 15), 
+    max_edge = c(0, 1.5), 
+    subcircle = 0.15, 
+    highest = FALSE
+  )
+)
+# 2.3. Calculo de cada uno de los MDS
+mds <- lapply(
+  names(algoritmos_mds),
+  function(nombre) {
+    # Cálculo del MDS
+    mds <- lidR::rasterize_canopy(
+      teselas_n,
+      res = 1,
+      algorithm = algoritmos_mds[[nombre]]
+    )
+
+    plot(mde)
+
+    # Recorte a la extensión del AOI
+    mds_rec <- mds %>% 
+      terra::crop(AOI) %>% 
+      terra::mask(AOI)
+
+    plot(mds_rec)
+
+    # Guardado de los rásteres
+    terra::writeRaster(
+      mds,
+      here::here(paste0("data/mds/mds_", nombre, ".tif")),
+      overwrite = TRUE
+    )
+    
+    terra::writeRaster(
+      mds_rec,
+      here::here(paste0("data/mds/mds_", nombre, "_rec.tif")),
+      overwrite = TRUE
+    )
+
+    # Lista con los resultados
+    return(list(full = mds, rec = mds_rec))
+  }
+)
+
+# 2.4. Nombramos los elementos de la lista
+names(mds) <- names(algoritmos_mds)
 ```
 
 ### Mapa de vegetación
@@ -657,11 +732,7 @@ En esencia, la diversidad beta es la variación en la composición de especies e
 
 No existe un único método para calcular la (di)similitud entre dos (o más) comunidades diferentes (o muestras de la misma comunidad), y en la mayoría de los casos la elección entre un método u otro consiste en una decisión arbitraria [@ricotta2017].
 
-En nuestro caso, para calcular este parámetro emplearemos los *índices de disimilitud* (de multiples comunidades) propuestos (o sintetizados) por @chao2016 (además de otros, para poder comparar resultados). Estos son:
-
--   
-
-En concreto, calcularemos todos los índices integrados en la función `betadiver()` de la librería `vegan` [@oksanen2025]. Esta función emplea como *input* la matriz transpuesta del data frame `abundanacia` empleado (en el apartado anterior) para calcular los índices de diversidad alpha. El nombre de los índices, así como sus respectivas ecuaciones, pueden consultarse empleando la misma función, pero especificando el parámetro `help` como `TRUE` (`vegan::betadiver(help = TRUE)`).
+En nuestro caso, calcularemos todos los índices integrados en la función `betadiver()` de la librería `vegan` [@oksanen2025]. Esta función emplea como *input* la matriz transpuesta del data frame `abundanacia` empleado (en el apartado anterior) para calcular los índices de diversidad alpha. El nombre de los índices, así como sus respectivas ecuaciones, pueden consultarse empleando la misma función, pero especificando el parámetro `help` como `TRUE` (`vegan::betadiver(help = TRUE)`).
 
 ```{r}
 #| label: beta-diversidad
