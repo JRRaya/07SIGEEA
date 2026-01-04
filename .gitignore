@@ -3,6 +3,7 @@ data/
 script/images/
 docs/
 script/.vdoc*
+script/entrega_files/
 # Carpetas/archivos a no excluir
 !data/gbif/0067883-251120083545085.zip
 !data/lidar/lidar2/lidar2.jnlp

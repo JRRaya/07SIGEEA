@@ -6,6 +6,7 @@ format:
     toc: true
     number-sections: true
     embed-resources: true
+    self-contained-math: true
 knitr:
   opts_knit:
     root.dir: ".."
@@ -19,6 +20,7 @@ bibliography: references.bib
 #| message: false
 #| warning: false
 #| error: false
+#| output: false
 
 # 1. Carga de paquetes y limpieza de entorno
 # 1.1. Limpiamos la RAM
@@ -60,7 +62,7 @@ options(gbif_email = "a02racaj@uco.es")
 ## Flujo de trabajo
 
 ```{mermaid}
-#| label: flujo-trabajo
+%%| label: flujo-trabajo
 
 flowchart LR
     1(Rediam) --> 5[/Histórico incendios <br> EPSG:3042/] --> 6[Extracción AOI <br> Incendio de los Guájares<br> 08/09/2022] --> 7[/AOI <br> EPSG:3042/] --> 11[Reproyección] --> 12[/AOI <br> EPSG:4326/] --> 14[/AOI_wkt <br> EPSG:4326/]
@@ -189,6 +191,10 @@ Esta función, al igual que en el caso de la clasificación de la nube de puntos
 
 ```{r}
 #| label: mde
+#| message: false
+#| warning: false
+#| error: false
+#| eval: false
 
 # 1. Listamos las teselas
 rutas_teselas <- list.files(
@@ -210,7 +216,7 @@ errores <- las_check(teselas, print = TRUE)
 # 4. Cálculo del MDE
 # 4.1. Listamos los algoritmos a emplear
 algoritmos_mde <- list(
-  tin= tin(),
+  tin= tin() # ,
   # idw = knnidw(),
   # kri = kriging()
 )
@@ -256,6 +262,17 @@ mde <- lapply(
 
 # 4.3. Nombramos los elementos de la lista
 names(mde) <- names(algoritmos_mde)
+```
+
+```{r}
+#| message: false
+#| warning: false
+#| error: false
+#| echo: false
+MDE1 <- rast("data/mde/mde_idw_rec.tif")
+MDE2 <- rast("data/mde/mde_tin_rec.tif")
+plot(MDE1)
+plot(MDE2)
 ```
 
 #### MDS
@@ -306,6 +323,10 @@ Existen principalmente tres métodos para poder obtener el MDS(n):
 
 ```{r}
 #| label: mds
+#| message: false
+#| warning: false
+#| error: false
+#| eval: false
 
 # 1. Normalización del terreno
 # 1.1. Definimos plantilla de salida de las teselas procesadas
@@ -315,17 +336,16 @@ Existen principalmente tres métodos para poder obtener el MDS(n):
 teselas_normalizadas <- lapply(
   names(algoritmos_mde),
   function(nombre) {
-    opt_output_files(teselas) <- paste0(here::here(paste0("data/lidar/lidar2/norm/", nombre, "/", nombre, "_", "/")), "{ORIGINALFILENAME}") # Configurar salida del catálogo
+    opt_output_files(teselas) <- {
+      dir_p <- here::here("data/lidar/lidar2/norm", nombre)
+      dir.create(dir_p, recursive = TRUE, showWarnings = FALSE)
+      file.path(dir_p, paste0(nombre, "_{ORIGINALFILENAME}"))
+    } # Configurar salida del catálogo
     opt_laz_compression(teselas) <- TRUE # Configurar formato comprimido de salida
+ 
+    teselas_n <- lidR::normalize_height(teselas, algoritmos_mde[[nombre]]) # Normalización
 
-    # Cálculo del MDE
-    teselas_n <- lidR::normalize_height(
-      teselas,
-      algoritmos_mde[[nombre]]
-    )
-
-    # Lista con los resultados
-    return(teselas_n)
+    return(teselas_n) # Lista con los resultados
   }
 )
 
@@ -764,7 +784,7 @@ beta <- lapply(
         valor = disimilitud[as.character(OBJECTID)],
         metodo = idx
       ) %>%
-      select(OBJECTID, valor, metodo, geom)
+      select(OBJECTID, valor, metodo)
     
     return(beta_veg)
   }
@@ -775,7 +795,7 @@ names(beta) <- nombres
 
 # 5.2.5. Comprobación visual
 mapview(beta[["sor"]], zcol = "valor", layer.name = "Beta Sorensen") +
-  mapview(beta[["j"]], zcol = "valor", layer.name = "Beta Whittaker")
+  mapview(beta[["w"]], zcol = "valor", layer.name = "Beta Whittaker")
 
 # 5.2.6. Guardado
 st_write(
