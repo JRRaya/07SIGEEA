@@ -217,8 +217,8 @@ errores <- las_check(teselas, print = TRUE)
 # 4.1. Listamos los algoritmos a emplear
 algoritmos_mde <- list(
   tin= tin() # ,
-  # idw = knnidw(),
-  # kri = kriging()
+  idw = knnidw(),
+  kri = kriging()
 )
 
 # 4.2. Cálculo de los MDEs mediante una función anónima
@@ -354,7 +354,7 @@ teselas_normalizadas <- lapply(
 # 2.1.1. Listamos las teselas normalizadas
 rutas_teselas_n <- list.files(
   path = "data/lidar/lidar2/norm/tin",
-  pattern = "^tin.*IRC\\.las$",
+  pattern = "^tin.*IRC\\.laz$",
   full.names = TRUE
 )
 
@@ -372,7 +372,7 @@ errores_tin_n <- las_check(teselas_n, print = TRUE)
 algoritmos_mds <- list(
   p2r = p2r(
     subcircle = 0.2, 
-    na.fill = NA
+    na.fill = tin()
   ),
   tin = dsmtin(
     max_edge = 8, 
@@ -385,6 +385,7 @@ algoritmos_mds <- list(
     highest = FALSE
   )
 )
+
 # 2.3. Calculo de cada uno de los MDS
 mds <- lapply(
   names(algoritmos_mds),
