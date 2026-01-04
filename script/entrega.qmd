@@ -1,0 +1,739 @@
+---
+title: "Untitled"
+format:
+  html:
+    code-fold: true
+    toc: true
+    number-sections: true
+    embed-resources: true
+knitr:
+  opts_knit:
+    root.dir: ".."
+bibliography: references.bib
+---
+
+# Introducción
+
+```{r}
+#| label: setup
+#| message: false
+#| warning: false
+#| error: false
+
+# 1. Carga de paquetes y limpieza de entorno
+# 1.1. Limpiamos la RAM
+rm(list = ls(all.names = TRUE))
+pacman::p_unload(pacman::p_loaded(), character.only = TRUE)
+gc(full = TRUE)
+
+# 1.2. Cargamos las librerías a emplear
+# 1.2.1. En R
+pacman::p_load(sf, terra, stringr, dplyr, tidyr, tidyverse, trend, here, ggplot2, ggridges, viridis, patchwork, tidyterra, mapview, stars, whitebox, reticulate, rgbif, vegan, betapart, adespatial, iNEXT, SpadeR, lidR, lidRmetrics)
+# devtools::install_github("ptompalski/lidRmetrics")
+library(lidRmetrics)
+
+# 1.3. Configuración de `terra`: suprimir las barras de progreso
+options(
+  terra.progress = 0
+)
+
+# Configurar para que no aparezca
+# Moverlo a otro bloque en el que se especifiquen, y luego se inserte el objeto en la funcion de rgbif
+# 1.4. Configuración de `rgbif`
+options(gbif_user = "jrraya")
+options(gbif_pwd = "JRaul2412-")
+options(gbif_email = "a02racaj@uco.es")
+```
+
+```{r}
+#| label: setup-gbif
+#| echo: false
+
+# 1.4. Configuración de `rgbif`
+options(gbif_user = "jrraya")
+options(gbif_pwd = "JRaul2412-")
+options(gbif_email = "a02racaj@uco.es")
+```
+
+# Metodología
+
+## Flujo de trabajo
+
+```{mermaid}
+#| label: flujo-trabajo
+
+flowchart LR
+    1(Rediam) --> 5[/Histórico incendios <br> EPSG:3042/] --> 6[Extracción AOI <br> Incendio de los Guájares<br> 08/09/2022] --> 7[/AOI <br> EPSG:3042/] --> 11[Reproyección] --> 12[/AOI <br> EPSG:4326/] --> 14[/AOI_wkt <br> EPSG:4326/]
+    11[Reproyección] --> 13[/AOI <br> EPSG:25830/]
+    1(Rediam) --> 8[/Mapa de vegetación <br> EPSG:25830/]
+    3(Sentinel-2) --> 9[/Mapa de severidad <br> EPSG:/]
+    4(GBIF) --> 10[/Datos de presencia <br> EPSG:4326/]
+```
+
+## Variables segmentadoras
+
+### AOI
+
+Nuestro *Área de Interés* (AOI) consiste en el incendio acontecido en 2022 en el término municipal de *Los Guájares*, en la provincia de *Granada*. Más concretamente, este incendio abarcó los términos municipales de *Albuñuelas*, *El Valle*, *El Pinar*, *Vélez de Benaudalla* y *Los Guájares*. En este incendio, la llamas dejarón tras de sí más de 5500 hectáreas arrasadas.
+
+La capa vectorial del *histórico de incendios* puede obtenerse en el portal de descargas de la [Rediam](https://www.juntadeandalucia.es/medioambiente/portal/acceso-rediam) (*Red de Información Ambiental de Andalucía*). Una vez cargada la capa vectorial, debemos de seleccionar el polígono, el cuál constituye nuestro AOI (*Area of Interest*).
+
+Es necesario practicar una reproyección de esta capa (la que contiene el polígono del incendio que nos incumbe) al CRS EPSG:4326. Este paso es requerido pues, para poder descargar desde el [IGN](https://www.ign.es/web/ign/portal) (*Instituro Geográfico Nacional*) tan solo la información correspondiente a nuestro AOI (y no una tesela/s de mayor extensión), necesita que el polígono suministrado se encuentre en este CRS.
+
+Esta afirmación también es aplicable para la descarga de datos de [GBIF](https://www.gbif.org/es/) (*Global Biodiversity Information Facility*, o *Infraestructura Mundial de Información sobre Biodiversidad* en castellano). Esta es una "iniciativa internacional que diseña, implementa, coordina y fomenta la recopilación, vinculación, normalización, digitalización y divulgación de datos sobre la biodiversidad mundial"
+
+También es necesario reproyectar la capa de nuestro área de interés al CRS EPSG:25830. Además de hacer que coincida espacialmente con la capa vetorial de vegetación, y de este modo poder realizar operaciones espaciales con ellas, este CRS es necesario (o cualquiera que emplee coordenadas métricas) para poder calcular variables como la pendiente, pues este cálculo (a partir del MDE) requiere que las coordenadas sean métricas y no angulares. De otro modo, el cálculo de esta variable sería erróneo.
+
+```{r}
+#| label: AOI
+#| message: false
+#| warning: false
+#| error: false
+
+# 2. Área de Interés (AOI)
+# 2.1. Carga de la capa de incendios ya filtrada
+AOI <- read_sf(
+  here::here("data/incendios/incendios_historicos.gpkg"), 
+  layer = "incendios_historico_2025_06"
+  )[2703,] # Seleccionamos la fila #2703, correpondiente al incendio de Los Guájares
+
+# 2.2. Comprobación visual
+mapview(AOI)
+
+# 2.3. Reproyección
+# 2.3.1. Reproyección al CRS EPSG:25830
+if(sf::st_crs(AOI) != sf::st_crs("EPSG:25830")) { 
+  message("CRS distinto de EPSG:25830; reproyectando a EPSG:25830")
+  AOI <- sf::st_transform(AOI, "EPSG:25830")
+}
+
+# 2.3.2. Reproyección al CRS EPSG:4326
+if(sf::st_crs(AOI) != sf::st_crs("EPSG:4326")) { 
+  message("CRS distinto de EPSG:4326; reproyectando a EPSG:4326")
+  AOI_4326 <- sf::st_transform(AOI, "EPSG:4326")
+}
+
+# 2.4. Guardado de las capas
+st_write(
+  AOI, 
+  here::here("data/incendios/AOI.shp"), 
+  quiet = TRUE,
+  delete_dsn = TRUE
+)
+
+st_write(
+  AOI_4326, 
+  here::here("data/incendios/AOI_4326.shp"), 
+  quiet = TRUE,
+  delete_dsn = TRUE
+)
+```
+
+### Mapa de severidad
+
+### Variables topológicas
+
+#### MDE
+
+Para calcular el *Modelo Digital de Elevaciones* (*MDE*), y sus variables topológicas derivadas (que se calculan de este), vamos a emplear los datos *LiDAR* (*Light Detection and Ranging*) que se encuentran puestos a disposición del público general gracias al IGN. Concretamente, estos datos pueden obtenerse en su [*Centro de Descargas*](https://centrodedescargas.cnig.es/CentroDescargas/home).
+
+Para el procesamiento y manejo de estos datos LiDAR emplearemos el paquete `lidR` [@roussel2025]. En el libro dedicado a la librería [@roussel], redactado por el mismo creador que esta, viene especificado como calcular las métricas que emplearemos en nuestro análisis.
+
+Para empezar, tendremos que obtener una *clasificación de suelo*, que consiste, como su porpio nombre indica, en clasificar los puntos de la nube que corresponden a *suelo* y a *no suelo*. Este es un paso previo a la generación del MDE.
+
+En nuestro caso, los datos ya han sido clasificados. Los datos LiDAR del IGN ya han sido postprocesados tras su adquisición, empleando para ello el software [*TerraScan*](https://terrasolid.com/products/terrascan/), que es el estándar industrial. Este software emplea la clasificación de puntos estándar de [*American Society for Photogrammetry and Remote Sensing*](https://www.asprs.org/) (ASPRS):
+
+| Valor (Bits 0:4) | Clase                      |
+|------------------|----------------------------|
+| 0                | Creado, nunca clasificado  |
+| 1                | Sin asignar (Unclassified) |
+| 2                | Suelo (Ground)             |
+| 3                | Vegetación baja            |
+| 4                | Vegetación media           |
+| 5                | Vegetación alta            |
+| 6                | Edificaciones              |
+| 7                | Punto bajo (Ruido)         |
+| 8                | Reservado                  |
+| 9                | Agua                       |
+| 10               | Ferrocarril                |
+| 11               | Superficie de carretera    |
+| 12               | Reservado                  |
+| 13               | Cable - Guarda (Escudo)    |
+| 14               | Cable - Conductor (Fase)   |
+| 15               | Torre de transmisión       |
+| 16               | Conector de estructura     |
+| 17               | Tablero de puente          |
+| 18               | Ruido alto                 |
+| 19               | Estructura elevada         |
+| 20               | Suelo ignorado             |
+| 21               | Nieve                      |
+| 22               | Exclusión temporal         |
+| 23-63            | Reservados                 |
+| 64-255           | Definiddo por el ususario  |
+
+: Clasificación de puntos estándar de la ASPRS [@lasspeci].
+
+En caso de que los datos fueran "crudos" y, por tanto, necesitásemos clasificarlos, `lidR` ofrece la función `lidR::classify_ground()`. Esta función permite aplicar de base los algorítmos de clasificación *Progressive Morphological Filter* [@zhang2003], *Cloth Simulation Function* [@zhang2016] y *Multiscale Curvature Classification* [@evans2007]. Además, la librería también permite generar tu propio algoritmo de clasificación para posteriormente aplicarlo mediante la mencionada función.
+
+Como se ha dicho antes, los datos del LiDAR del IGN ya vienen clasificados, por lo que se puede proceder directamente al cálculo del MDE. Este paso es crítico, pues la precisión de los productos generados a partir del MDE dependerá de lo bien construido que esté el MDE. Para calcular el MDE, podemos servirnos de la función `lidR::rasterize_terrain()` que incluye los siguientes algoritmos:
+
+-   *Triangular irregular network* (TIN): Este algoritmo es el más rápido y eficiente computacionalmente. Sin embargo, este maneja de forma pobre los bordes de las teselas, por lo que es necesario aplicar un buffer alrededor de cada tesela para asegurar que la ponderación en base a los datos vecinos sea correcta. Este algoritmo se recomienda cunado es necesario procesar de forma rápida extensiones muy amplias de terreno, en donde la precisión del MDE no es especialmente relevante.
+
+-   *Invert distance weighting* (IDW): Es rápido, pero aún así es aproximadamente el doble de lento que el TIN. Los datos del terreno obtenidos no son muy realistas, pero maneja mejor los artefactos de los bordes. Se recomienda cuando la calidad del MDE no es extremadamente importante, no se puede aplicar un buffer, pero las regiones de los bordes son importantes.
+
+-   *Kriging*: Es el más costoso computacionalmente, pero también es el que aporta el resultado más fidedigno. No se recomienda su uso para zonas muy extensas.
+
+Independientemente del método empleado, siempre se recomienda realizar un buffer para obtener datos de las regiones vecinas. Tanto la función de carga de la tesela en memoria (`lidR::readLAS()`) como la de lectura de un catálogo (de cabezeras) de teselas (que es el que empleamos en este caso) aplican un buffer automático de 30 unidades con respecto al CRS de las teselas.
+
+Esta función, al igual que en el caso de la clasificación de la nube de puntos, también admite el empleo de otros algoritmos para el cálculo del MDE.
+
+```{r}
+#| label: mde
+
+# 1. Listamos las teselas
+rutas_teselas <- list.files(
+  path = "data/lidar/lidar2",
+  pattern = "^PNOA.*IRC\\.laz$",
+  full.names = TRUE
+)
+
+# 2. Leemos los metadatos de las teselas (sin cargarlas en RAM)
+teselas <- readLAScatalog(
+  folder = rutas_teselas, 
+  select = "xyzcrn", 
+  filter = "-drop_z_below 0"
+)
+
+# 3. Validamos los datos
+errores <- las_check(teselas, print = TRUE)
+
+# 4. Cálculo del MDE
+# 4.1. Listamos los algoritmos a emplear
+algoritmos <- list(
+  tin= tin(),
+  idw = knnidw(),
+  kri = kriging()
+)
+
+# 4.2. Cálculo de los MDEs mediante una función anónima
+mde <- lapply(
+  names(algoritmos),
+  function(nombre) {
+    # Cálculo del MDE
+    mde <- lidR::rasterize_terrain(
+      teselas,
+      res = 1,
+      algorithm = algoritmos[[nombre]],
+      pkg = "terra"
+    )
+
+    plot(mde)
+
+    # Recorte a la extensión del AOI
+    mde_rec <- mde %>% 
+      terra::crop(AOI) %>% 
+      terra::mask(AOI)
+
+    plot(mde_rec)
+
+    # Guardado de los rásteres
+    terra::writeRaster(
+      mde,
+      here::here(paste0("data/mde/mde_", nombre, ".tif")),
+      overwrite = TRUE
+    )
+    
+    terra::writeRaster(
+      mde_rec,
+      here::here(paste0("data/mde/mde_", nombre, "_rec.tif")),
+      overwrite = TRUE
+    )
+
+    # Lista con los resultados
+    return(list(full = mde, rec = mde_rec))
+  }
+)
+
+# 4.3. Nombramos los elementos de la lista
+names(mde) <- names(algoritmos)
+```
+
+#### MDS
+
+Obtener un *Modelo Digital de Superficies* (MDS) nos ayuda a poder inferir el estado de la vegetación, así como la estructura del ecosistema del que se deriva. Concretamente, el producto cartográfico que nos va a permitir determinar la estructura del dosel vegetal es el *Modelo Digital de Superficies Normalizado* (MDSn). Con este fin en mente, es muy recomendable practicar una normalización previa de la nube de puntos LiDAR. Esta consiste en la estandarización de todos los puntos clasificados como "suelo" a un valor $Z = 0$. Este procedimiento permite una comparación más directa entre distintos puntos de la capa de altura de la vegetación (*Canopy Height Models*, CHM), ya que tras la normalización su altura estará definida con respecto a la altura del suelo, y no con respecto al nivel del mar.
+
+Principalmente, a la hora de trabajar con datos LiDAR, existen tres formas de realizar dicha normalización:
+
+-   **Normalización a partir del MDE**: Este método recae en restarle aritmética la altura de los píxeles de un MDE (por ejemplo, el generado en el apartaddo anterior) a la nube de puntos no clasificados como "suelo". El histograma resultante de la altura demuestra que, tras la normalización de la nube de puntos, algunos de los puntos clasificados como "suelo" no cumplen la condición de que su $Z = 0$.
+
+    Esto se debe a que la normalización de todos los puntos de la nube se realiza con respecto a unidad discreta (que no captura la continuidad que ofrece la nube de puntos completa), como son los píxeles que componen un MDE [@roussel].
+
+-   **Normalización a partir de la nube de puntos**: Esta consiste en la normalización directa a partir de los puntos clasificados como suelo, lo que evita las incosistencias generadas por la resta con elevaciones predefinidas para una determinada localización/área.
+
+    En teoría, si la nube de puntos se encuentra correctamente clasificada, esto evita la generación de puntos clasificados como "suelo" con $Z \neq 0$.
+
+-   **Normalización híbrida**: Consiste en la interpolación de los píxeles a partir de un MDE ya obtenido.
+
+En nuestro caso, tan solo practicaremos la normalización a partir de la propia nube de puntos para evitar inconsistencias derivadas de la naturaleza discreta de la capa ráster del MDE. La función `lidR::normalize_height()` permite realizar dicha operación, permitiendonos también seleccionar el algortimo con el que queremos realizar la interpolación para de la altura "continua" (es decir, el cálculo interno del MDE).
+
+De nuevo, emplearemos los tres algoritmos antes presentados, de modo que podamos comparar resultados en caso de que sea preciso.
+
+A partir de esta(s) capa(s) normalizada(s), podemos obtener el MDS o el *Modelo de Altura del Dosel* (o CHM por sus siglas en inglés), que son capas ráster que representan la altura máxima obtenida con los retornos de los pulsos del sensor LiDAR. Al haber normalizado previamente la nube de puntos, la superficie obtenida (el MDS) representa la altura del dosel (en el caso de áreas que presenten vegetación), es decir, el CHM. Dentro del ecosistema de la librería `lidR`, existe la posibilidad de realizar esta operación mediante la función `lidR::rasterize_canopy()`.
+
+Existen principalmente tres métodos para poder obtener el MDS(n):
+
+-   **Point-to-raster**: Es el caso más sencillo de todos. Consiste en generar una malla regular de celdas del área que abarca nuestra nube de puntos. A cada uno de los píxeles (celdas) se les asigna el valor del punto (o retorno) con mayor altura dentro del píxel. Es el algoritmo más rápido y sencillo de implementar computacionalmente. Este algoritmo puede aplicarse especificando `p2r()` en el atributo `algorithm`, dentro de la función `lidR::rasterize_canopy()` (`chm <- rasterize_canopy(ctg, res = 0.5, algorithm = p2r())`).
+
+    Una desventaja de este método es que algunos de los píxeles de la capa resultante pueden estar vacíos, debido a que la resolución de esta sea mayor que la densidad de puntos de la nube (por lo que en algunos píxeles no caería ningún punto de la nube).
+
+    Este problema de píxeles vacíos puede resolverse de varias formas. Una solución sería sustituir cada uno de los puntos de la nube con un disco de radio conocido (e.g. 15 cm). Esto trat de simular el comportamiento real de la hueya del barrido del sensor que, más que de un único punto, se trata de un área circular. Al calcular el CHM, este cáclculo es equivalente a calcularla a partir de una nube de puntos densificada, qeu de algún modo posee un significado físico real. Para poder computarlo, basta con escribir `chm <- rasterize_canopy(ctg, res = 0.5, algorithm = p2r(subcircle = 0.15))`.
+
+    Otra opción es interpolar los valores faltantes, empleando los algoritmos de interpolación ya mencionados, como por ejemplo el de TIM: `chm <- rasterize_canopy(ctg, res = 0.5, algorithm = p2r(0.2, na.fill = tin()))`.
+
+-   **Triangulación**: El algoritmo de triangulación trabaja generando primero una TIN empleando tan solo los primero retornos (los que corresponden a las cotas más elevadas del pulso), y a continuación interpola dentro de cada triángulo generado para calcular la elevación para cada uno de los píxel del ráster.
+
+    En su forma más simple, este método consiste en una triangulación 2D de los primeros retornos. A pesar de ser más complejo que el algoritmo de *point-to-raster*, este método presenta la ventaja de no depender de parámetros, y además el ráster resultante no presenta píxeles vacíos (independientemente de la resolución escogida). Aún así, este método (al igual que el de *point-to-raster*) también puede presentar ruido en la capa resultante, atribuible a los primeros retornos que penetran demasiado en el dosel. Estos "huecos" que se generan pueden hacer más difícil la posterior segmentación individual de los árboles, además de cambiar la textura del dosel de una forma inverosímil.
+
+    Para evitar este problema, es común recurrir a un suavizado del CHM en una fase de postprocesamiento.
+
+    De nuevo, se puede recurrir a la función ya mencionada para calcular el CHM: `chm <- rasterize_canopy(ctg, res = 0.5, algorithm = dsmtin())`. Este método, al igual que el anterior, puede presentar resultados poco coherentes cuando faltan muchos puntos de la nube (como por ejemplo en terrenos que presentan muchas oquedades o masas de agua). En este caso, la solución pasa por configurar el parámetro `max_edge`, que define el número máximo de bordes de un triángulo permitos en una *triangulación de Delaunay*. Por defecto, el valor establecido es `0`, lo que significa que ningún triángulo es eliminado. Por otro lado, con un valor de (por ejemplo) `8` (`chm <- rasterize_canopy(ctg, res = 0.5, algorithm = dsmtin(max_edge = 8))`), los triángulos que contengan bordes con una longitud mayor a 8 serán eliminados (no serán tenidos en cuenta) de la triangulación.
+
+-   **Algoritmo sin huecos (*pit-free algortihm*)**: Este algorimo más avanzado (de los que veremos), y evita la generación de huecos (píxeles sin valor de la variable) durante su cálculo, la contrario que los anteriores métodos (los cuáles requerían un postprocesamiento para poder solventar este problema).
+
+```{r}
+#| label: mds
+
+# 1. Normalización del terreno
+# 1.1. Definimos plantilla de salida de las teselas procesadas
+# opt_output_files(teselas) <- paste0(here::here("data/lidar/lidar2/norm/"), "{ORIGINALFILENAME}_norm")
+
+# 1.2. Aplicamos de forma iterativa la normalización en cada caso
+teselas_n <- lapply(
+  names(algoritmos),
+  function(nombre) {
+    opt_output_files(teselas) <- paste0(here::here(paste0("data/lidar/lidar2/norm/", nombre, "/", nombre, "_", "/")), "{ORIGINALFILENAME}")
+
+    # Cálculo del MDE
+    teselas_n <- lidR::normalize_height(
+      teselas,
+      algoritmos[[nombre]]
+    )
+
+    # Lista con los resultados
+    return(teselas_n)
+  }
+)
+
+# 2. Cálculo del CHM
+# 2.1. Point-to-raster
+
+# 2.2. Triangulación
+
+# 2.3. Algoritmo sin huecos
+```
+
+### Mapa de vegetación
+
+La capa de vegetación fue obtenida de nuevo desde el portal de descargas de la Rediam. Este mapa de vegetación generado a escala 1:10000 (mayor resolución que la del [*Mapa Forestal de España*](https://www.miteco.gob.es/es/cartografia-y-sig/ide/descargas/biodiversidad/mfe.html)), a pesar de ser puesto a disposición del público en la ya mencionada plataforma (*IDE*) en 2010, posee aún mayor antigüedad (2010).
+
+```{r}
+#| label: vegetacion
+#| message: false
+#| warning: false
+#| error: false
+
+# 3. Vegetación del AOI
+# 3.1. Importación del mapa de vegetación
+vegetacion <- here::here("data/vegetacion/VEG10.shp") %>% # Carga de la capa como un objeto `sf`
+    sf::st_read(quiet = TRUE)
+
+# 3.2. Asignación de CRS en caso de que aun no lo esté
+if(is.na(st_crs(vegetacion))) { # Si no tiene CRS asignado, se establece su CRS ('EPSG:25830')
+  message("CRS indefinido. Asignando EPSG:25830")
+  sf::st_crs(vegetacion) <- "EPSG:25830" # Esto se comprobó empleando QGIS
+}
+
+# 3.3. Recorte con nuestro AOI
+if(sf::st_crs(vegetacion) == sf::st_crs(AOI)) {
+  message("Los CRSs coinciden. Recortando la capa de vegetación a la extensión del AOI")
+  vegetacion <- sf::st_intersection(vegetacion, sf::st_geometry(AOI))
+}
+
+# 3.4. Comprobación visual
+mapview(vegetacion, zcol = "D_ARBO1_SP")
+
+# 3.5. Guardado de la capa
+st_write(
+  vegetacion, 
+  here::here("data/vegetacion/vegetacion.gpkg"),
+  quiet = TRUE,
+  delete_dsn = TRUE
+)
+```
+
+### Bioiversidad
+
+Para la obtención de los datos de presencia de especies emplearemos el repositorio de GBIF.
+
+Para poder denotar que puntos de la capa vectorial de presencias se encuentran dentro de que polígonos de la capa de vegetación, tendremos que basarnos en *Dimensionally Extended Nine-Intersection Model* (DE-9IM, @egenhofer1991, @clementini1993). Este consiste en un modelo topológico (así como un estándar) que permite describir de forma cualitativa la relación entre dos geometrías en un espacio bidimensional ($R^2$).
+
+El DE-9IM se basa en una *matríz de intersección* de tamaño 3x3, la cual posee la siguiente forma:
+
+$$
+DE9IM(a,b)=\begin{bmatrix}\dim(I(a)\cap I(b))&\dim(I(a)\cap B(b))&\dim(I(a)\cap E(b))\\\dim(B(a)\cap I(b))&\dim(B(a)\cap B(b))&\dim(B(a)\cap E(b))\\\dim(E(a)\cap I(b))&\dim(E(a)\cap B(b))&\dim(E(a)\cap E(b))\end{bmatrix}
+$$
+
+Cualquier geometría posee un valor de *dimensión*, el cual puede ser:
+
+-   *0* para los *puntos*.
+
+-   *1* para las *líneas*.
+
+-   *2* para los *polígonos*.
+
+-   *F* (*false*) o *-1* para las *entidades vacías*.
+
+Como la matriz de índices puede leerse de arriba a abajo y de izquierda a derecha, el resultado final es un "código" compuesto de 9 caracteres, cuyo dominio es $\{ 0, 1, 2, F \}$
+
+A su vez, cualquier geometría posee *interior* (*I*), *borde* (*B*) y *exterior* (*E*), que son los elementos que se evalúan en la *matriz de intersección*. En el caso de los polígonos es bastante directa la asignación de estas propiedades, pero no es tan sencillo en el caso de las líneas y los puntos. Para las **líneas**, los *bordes* están constituidos por los puntos finales de estas, mientras que el *interior* estaría formado por todos aquellos otros puntos que la constituyen y que son distintos de los puntos finales. Por otro lado, los **puntos** no poseen *bordes*, pero si un *interior* de dimensión 0 [@pebesma2025].
+
+![Matriz de intersección con la que se evalúa la relación binaria de dos geometrías dentro del modelo [@postgis].](images/Matriz%20de%20intersección.jpg)
+
+Con todo ello, cualquier propiedad topológica basada en una relación binaria del DE-9IM es un *predicado espacial*, que es una función lógica que evalúa si una relación topológica o geométrica específica se cumple entre dos o más objetos en el espacio. Por suerte, ya existen nombres estandarizados para algunas de las relaciones más comúnes.
+
+Una de estas relaciones, la cual nos acontece en este caso, es la de *unión disjunta* (*disjoint* en inglés): "*a* y *b* son disjuntos si no poseen puntos en común, por lo que forman geometrías *desconectadas*". Más bien, la función que emplearemos en este caso es su inversa, es decir, la *intersección* (*intersect* en inglés): "*a* y *b* se intersectan si poseen al menos un punto en común".
+
+La función para comprobar la intersección de dos geometrías se encuentra implementada dentro del paquete `sf` [@pebesma2025] con la función `sf::st_join()`. En realidad, `sf::st_join()` es un *wrapper* de alto nivel que emplea internamente `sf::st_intersects` (que devuelve un objeto `sgbp`, *sparse geometry binary predicate*, que en esencia se trata de una lista de índices), pero este va más allá al practicar una fusión de las tablas de atributos que se evalúan. El resultado de aplicar esta función es un objeto `sf`, que en nuestro caso contendrá los puntos de presencia, junto con la información heredada para cada uno de ellos de la tabla de atributos de la capa de vegetación.
+
+Al poseer cada punto información sobre el polígono "al que pertenece", podemos calcular la biodiversidad para cada polígono a partir de la información heredada por los puntos tras la operación de intersección.
+
+En este caso, tendremos en cuenta los datos de presencia aportados por plataformas como [*iNaturalist*](https://www.inaturalist.org/) o [*eBird*](https://ebird.org/home), a pesar del inherente sesgo que poseen los usuarios que las emplean [@gonzález-moreno2025].
+
+```{r}
+#| label: presencia
+#| message: false
+#| warning: false
+#| error: false
+
+# 4. Descarga de datos de presencia de especies a partir de GBIF
+# 4.1. Transformar el bounding box de nuestro AOI al formato WKT (Well Known Text) para una búsqueda más precisa
+AOI_wkt <- st_as_sfc(st_bbox(AOI_4326)) %>% 
+  st_as_text()
+
+# 4.2. Consulta de datos de presencia para todas las especies presentes en el AOI
+# 4.2.1. Lanzamos la consulta a los servidores de GBIF
+consulta <- occ_download(
+  pred_within(AOI_wkt),
+  pred_lte("year", 2022), # Todos los registros historicos hassta el año 2022 (inclusive)
+  pred("hasCoordinate", TRUE),           # Solo con coordenadas
+  pred("hasGeospatialIssue", FALSE),     # Sin problemas espaciales
+  format = "SIMPLE_CSV"
+)
+
+# 4.2.2. Pausamos el script hasta que la descaraga este lista
+occ_download_wait(consulta)
+
+# 4.2.3. Descarga de la consulta en el directorio especificado
+descarga_consulta <- occ_download_get(
+  key = consulta, 
+  path = "data/gbif", 
+  overwrite = TRUE
+)
+
+# 4.2.4. Carga de la consulta en la sesión de R
+presencia_df <- occ_download_import(descarga_consulta)
+
+# 4.3. Converitir el dataframe resultante a un objeto vectorial
+presencia <- st_as_sf(
+  presencia_df, 
+  coords = c("decimalLongitude", "decimalLatitude"), 
+  crs = 4326
+)
+
+# 4.4. Recortar los datos de presencia a la extensión del AOI
+if(sf::st_crs(presencia) == sf::st_crs(AOI_4326)) {
+  message("Los CRSs coinciden. Recortando la capa de presencia a la extensión del AOI")
+  presencia <- sf::st_intersection(presencia, sf::st_geometry(AOI_4326))
+}
+
+# 4.5. Repreoyección al EPSG:25830 (CRS de la capa de vegetación)
+if(sf::st_crs(presencia) != sf::st_crs("EPSG:25830")) { 
+  message("CRS distinto de EPSG:25830; reproyectando a EPSG:25830")
+  presencia <- sf::st_transform(presencia, "EPSG:25830")
+}
+
+# 4.7. Unión espacial con la capa de vegetación
+presencia_veg <- presencia %>% 
+  st_join(
+    y = vegetacion %>% select(OBJECTID), # Simplificación capa vegetación
+    join = st_intersects # Función de predicado espacial a emplear
+  ) %>% 
+  filter(!is.na(OBJECTID)) # Selección de puntos dentro de polígonos
+
+# 4.6. Guardado de la capa
+st_write(
+  presencia_veg,
+  here::here("data/gbif/presencia_veg.gpkg"),
+  quiet = TRUE,
+  delete_dsn = TRUE
+)
+```
+
+#### Alpha diversidad
+
+La enorme cantidad de índices que se han venido gestando, así como sus "peliagudos" comportamientos, han llevado a sopesar la verdadera utilidad de este indicador como modo de caracterizar los ecosistemas y las comunidades que las componen [@hurlbert1971]. Sin embargo, como señala @jost2006, el concepto de diversidad no es inútil (ni útil, *per se*). A la hora de tomar decisiones (e.g. decidir que zonas deben conservarse o como restaurar una zona concreta afectada por una perturbación), estas deben estar integradas por más parámetros (e.g. integridad del hábitat o costes económicos) que nos permitan tener una visión más global del ecosistemas [@lande2000].
+
+Son las interpretaciones de la realidad basadas en un conocimiento profundo del sistema, y datos, las que realmente aportan riqueza a la interpretación de la realidad desde un pusto de vista ecológico, más que cualquier índice de forma aislada.
+
+@roswell2021 menciona alguno de los problemas (que el considera) que poseen los índices de Shannon y de Simpson tradicionales (y que me vienen perfectamente como hilo argumentor para exponerlos brevemente).
+
+El primero, es que la naturaleza de los índices empleados tradicionalmente para tratar de parametrizar la diversidad de los ecosistemas, por definición, difieren entre sí en su propensión a la hora de incluir o excluir (ponderar) las especies relativamente raras [@hill1973]. Cada uno mide cosas diferentes [@tuomisto2010], y este hecho dificulta enormente la comparación entre los resultados obtenidos con uno u otro:
+
+-   **Riqueza de especies** (*S*): Esta resulta la medida más directa y sencilla, pues consiste en medir el número de especies:
+
+    $$
+    S = número \enspace total \enspace de \enspace especies
+    $$
+
+-   **Índice de Shannon** (*H'*): Este mide el grado de incertidumbre sociado a encontrar una determinada especie (*tipo*), si escogemos un individuo al azar de nuestra muestra. Cuanto más homogéneas son las abundancias relativas de cada una de las especies entre sí, mayor será la incertidumbre (*entropía*) del (eco)sistema y, por tanto, mayor será la (bio)diversidad. Por tanto, lo que se esta midiendo es *información* [@hurlbert1971].
+
+    Este índice puede formularse de forma sencilla como:
+
+    $$
+    H' = - \sum^S_{i = 1} ln{p_i}^{p_i}
+    $$
+
+    donde:
+
+    $$
+    p_i = \frac{n_i}{N}
+    $$
+
+    siendo $p_i$ la *abundancia relativa* de la especie i, $n_i$ el *número de individuos de la especie* y *N* el *número total de individuos de todas las especies*.
+
+-   **Índice de Gini-Simpson** (*GS*): Por otro lado, el índice de Gini-Simpson mide *probabilidad*, concretamente, la probabilidad de que si seleccionamos dos individuos de manera aleatoria, estos pertenezcan a especies distintas [@simpson1949, @hurlbert1971]. Puede representarse matemáticamente mediante la siguiente ecuación:
+
+    $$GS = 1 - \sum^S_{i = 1} p_i^2$$
+
+Un segundo problema que le chirría [@roswell2021] de estos índices es que "los valores hallados para estos índices, al disminuir el *número de especies*, no varía (decrece) proporcionalmente entre ambos índices" (Fig).
+
+![Valores calculados para los índices de biodiversidad al reducir el *número de especies*.](images/Comparación%20índices%20de%20biodiversidad.jpg){fig-align="center"}
+
+A pesar de todo ello, el principal problema que presentan estos índices es que no permiten comparar oportunamente la biodiversidad entre distintas comunidades, aún empleando el mismo índice para hallar dicha biodiversidad. Esto se debe a que las proporciones a la hora de calcular estos índices (como ya se ha mencionado) no son lineales, lo que implica que implica que, por ejemplo, una comunidad con un índice de Shannon de 4.0 no posee el doble de especies que una comunidad con un valor del mismo índice de 2.0 unidades [@jost2006].
+
+Una metodología para medir la biodiversidad, y de este modo tratar de paliar las complicaciones implícitas antes mencionadas, fue propuesta por @hill1973 y reintroducida por el ecólogo [@jost2006; @roswell2021]. Este método parte de la premisa de que el *número de especies* y la *abundancia relativa de especies* son componentes de (o, mejor dicho, son parámetros que definen) la biodiversidad, y estos no son divisibles.
+
+La medidad de diversidad propuesta por @hill1973 consiste en una simple ecuación que, dependiendo del valor tomado por un solo parámetro, el exponente $q$, puede variar el "foco", dependiendo de si pondera de forma homogénea a todas las especies (incluso si estas son extremadamente raras), o si enfatiza las especies que son más comunes [@roswell2021].
+
+Normalmente suelen denominarse como "números de Hill", pero realmente son más generales que las modificaciones propuestas por @hill1973. El exponente y superíndice *q* puede denominarse como "orden" de diversidad; para todos los índices que son funciones de $\sum \nolimits_{i=1}^{S}p_i^q$, la verdadera diversidad depende tan solo del valor de *q* y de la frecuencia de especies, y no de la *forma funcional del índice* [@jost2006]:
+
+$$
+{}^{q}D \equiv \left( \sum_{i=1}^{S}p_i^q \right)^{1/\left( 1-q \right)}
+$$
+
+Esto implica que al calcular la biodiversidad de una comunidad, no importa el índice empleado para calcularla, pues, a mismo valor del orden *q*, todos dan el mismo valor de diversidad. *D* fue definido como el *número efectivo de especies* por @macarthur1965, y viene a determinar el número de especies en una comunidad equivalente compuesta por especies que poseen la misma abundancia, entendiendo dicha equivalencia como una comunidad con el mismo valor del índice.
+
+Como ya se ha mencionado, el orden de diversidad indica la sensibilidad a las especies comunes o a las especies raras. Valores más bajos de *q* son más insensibles a la frecuencia de especies ($q=0$ corresponde con la *riqueza de especies*). Todos los valores de $q<1$ dan valores de diversidad del índice calculado que favorecen desproporcionalmente a las especies raras.
+
+El punto crítico en el que el que se ponderan todas las especies por su frecuencia, sin favorecer ni a las especies comunes ni a las raras, se produce con $q=1$:
+
+$$
+{}^{1}D = \exp \left( - \sum_{i=1}^{S}{p_i ln{p_i} }\right) = \exp \left( H \right)
+$$
+
+Que corresponde a la exponencial del índice de entropía de Shannon. La decisión final de escoger un orden u otro dependerá de cuanto peso quiere dar el investigador a las especies raras.
+
+Como nuestros datos de presencia u ocurrencia son extraídos de un repositorio "oportunista" (GBIF), es necesario estandarizar los datos de presencia de los polígonos, pues el registro de especies se realiza de forma desigual entre ellos (e.g. parcelas/polígonos con mayor cercanía a vías de comunicación presentarán, por su mayor accesibilidad, un mayor número de registros).
+
+Existen diversos métodos de estandarización de muestras (por *esfuerzo*, *tamaño* o *cobertura*), aunque @roswell2021 recomienda emplear el método de *igualdad de cobertura* (*coverage-based sample standarization*). El concepto de *cobertura* no es nuevo. Este fue propuesto en la década de los 40' por el fundador de las ciencias de la computación, Alan Turing, aunque es recientemente cuando se ha venido aplicando al campo de la ecología para estandarización de muestras.
+
+La cobertura describe como de buena o acertada es una muestra a la hora de capturar la diversidad real de una comunidad, incluyendo las especies que aún no han sido detectadas [@roswell2021]. Más concretamente, la cobertura estima la proporción de individuos de una comunidad entera que se encuentran presentes en la muestra tomada de dicha comunidad. Al estandarizar por cobertura, la comparación entre muestras se realiza a tamaños distintos de muestreo (lo cuál resulta más equitativo que los métodos basados en rarefacción, pues estos tienden a subestimar la diversidad en polígonos muy diversos).
+
+La clave detrás del concepto de cobertura es que la proporción de individuos de una comunidad pertenecientes a especies que aún no han sido detectadas, puede ser estimada a partir de las frecuencias de especies de la muestra.
+
+Para estimar la cobertura tan solo se requieren 3 parámetros [@chao2012]:
+
+-   $f_1$: *especies únicas* (especies representadas por un solo individuo) en la muestra.
+
+-   $f_2$: *especies duplicadas* (especies representadas tan solo por dos individuos) en la muestra.
+
+-   $n$: número total de individuos de la muestra.
+
+@chao2012 proporcionan la siguiente ecuación para calcular la cobertura (*C*):
+
+$$
+C = 1 - \frac{f_1}{n} \left[ \frac{ \left( n - 1 \right) f_1 }{ \left( n - 1 \right) f_1 + 2 f_2 } \right]
+$$
+
+En R, la cobertura puede calcularse empleando las funciones `iNEXT` y `estimateD`del paquete `iNEXT` [@hsieh2025].
+
+Además, esta librería también nos permite calcular los tres números de Hill, de nuevo, mediante la función `iNEXT`. Con esta función podemos calcular tanto la *diversidad observada* como la *estimada* para cada uno de los polígonos de la capa de vegetación. Para ello, la función emplea como *input* un data frame en formato largo, en el que las filas representen las especies, y las columnas las parcelas de muestreo (en nuestro caso, estas parcelas son los ya mencionados polígonos de la capa de vegetación).
+
+El procedimiento sería:
+
+1.  Generar la matriz de abundancia, en la que cada fila es una especie, y cada columna un polígono (o su identificador):
+
+    1.1. Conversión de los datos de presencia de un objeto `sf` a un data frame, sirviendonos para ello de la función `sf::st_drop_geometry()`.
+
+    1.2. Agrupación por polígono (`OBJECTID`) y especie (`scientificName`) mediante `dplyr::group_by()`.
+
+    1.3. Empleo de la función de bajo nivel `dplyr::tally()` para realizar el conteo por grupos. Es más visual (se muestra explicitamente cada uno de los pasos) que emplear `dplyr::count()`, una función de alto nivel que si acepta nombres de columnas como *input* ya que realiza la agrupación internamente.
+
+    1.4. Pivotar las filas y las columnas. El nuevo data frame (en formato *ancho*) posee como nombre de columnas el identificador de cada uno de los polígonos (`names_from = OBJECTID`), y los valores en cada celda se contruyen a partir de los conteos de los grupos (`values_from = n`), asignando como "valor de relleno" (valor que toma la celda cuando no existe ningún conteo en un determinado grupo) el `0` (`values_fill = 0`).
+
+    1.5. Asignamos los nombres de las filas a partir de los nombres de especies. En este caso hay que hacer uso de la función `tibble::column_to_rownames()`, especificando que tome dichos nombres de la columna (variable) `scientificName`.
+
+2.  Cálculo de los índices de biodiversidad alpha mediante la función `iNEXT::iNEXT()`. Esta función genera un objeto `iNEXT` (una lista) que contiene todos los cálculos que nos interesan. Los valores de los índices hallados para cada uno de los polígonos, así como sus estimaciones asintóticas.
+
+3.  Extracción de los valores de los índices a partir de la lista generada en el paso anterior. El objeto `iNEXT` contiene un data frame (`AsyEst`), que a su vez contiene los valores de los índices observados y estimados. En nuestro caso, tomaremos los *observados* en lugar de los *estimados* (asintóticamente), pues la función `iNEXT::iNEXT()` puede hallar valores infinitos (`Inf`) para los valores de diversidad estimada.
+
+4.  Unión de los valores de diversidad hallados con los polígonos de la capa de vegetación (con `dplyr::left_join()`).
+
+Sería más interesante emplear la biomasa como medida de la abundancia de especies (en lugar del conteo directo de individuos). El empleo de la biomasa como medida de la abundancia, permite descrubrir patrones en la distribución de las especies y características del paisaje que no son dilucidables mediante un simple conteo de individuos [@magurran2004]. Aún así, este método es más complicado, y el procedimiento para obtener estos datos puede variar según los objetivos del estudio.
+
+```{r}
+#| label: alpha-diversidad
+#| message: false
+#| warning: false
+#| error: false
+
+# 5.1. Alpha-diversidad (Números de Hill mediante iNEXT)
+# 5.1.1. Preparación de la matriz de abundancia
+# iNEXT requiere que las especies sean filas y los sitios columnas
+abundancia <- presencia_veg %>%
+  st_drop_geometry() %>%
+  group_by(OBJECTID, scientificName) %>%
+  tally() %>% # Contamos registros por especie en cada polígono
+  pivot_wider(names_from = OBJECTID, values_from = n, values_fill = 0) %>%
+  column_to_rownames("scientificName")
+
+# 5.1.2. Cálculo de la diversidad alpha mediante iNEXT
+alpha <- iNEXT(
+  abundancia, # Data frame de abundancias por grupos
+  q = c(0, 1, 2), # Especificamos el cálculo de todos los índices (números de Hill)
+  datatype = "abundance" # Especificamos que los valores de entrada son de abundancia
+)
+
+# 5.1.3. Extracción de los valores de diversidad observada
+alpha_obs <- alpha$AsyEst %>%
+  select(Assemblage, Diversity, Observed) %>%
+  pivot_wider(names_from = Diversity, values_from = Observed) %>%
+  rename(
+    id = Assemblage,
+    q0 = `Species richness`,
+    q1 = `Shannon diversity`,
+    q2 = `Simpson diversity`
+  ) %>%
+  mutate(id = as.numeric(as.character(id)))
+
+# 5.1.4. Unión de los resultados con la capa original de vegetación
+alpha_veg <- vegetacion %>%
+  left_join(alpha_obs, by = c("OBJECTID" = "id")) %>% # Unimos por clave primaria (identificador polígono)
+  mutate(across(q0 | q1 | q2, ~replace_na(., 0))) # Reemplazamos NAs por 0 en polígonos donde no hubo registros de GBIF
+
+# 5.1.5. Comprobación visual
+mapview(alpha_veg, zcol = "q0", layer.name = "Hill Riqueza (q=0)") +
+  mapview(alpha_veg, zcol = "q1", layer.name = "Hill Shannon (q=1)") +
+  mapview(alpha_veg, zcol = "q2", layer.name = "Hill Simpson (q=2)") 
+
+# 5.1.6. Guardado de la capa
+st_write(
+  alpha_veg, 
+  here::here("data/gbif/alpha_veg.gpkg"),
+  quiet = TRUE,
+  delete_dsn = TRUE
+)
+```
+
+#### Beta diversidad
+
+Además de la diversidad alpha, que (en ecología) mide la biodiversidad de una parcela concreta de muestreo, existen otras formas de medir la biodiversidad. Por ejemplo, podríamos preguntarnos como cambia a escala regional, es decir, a nivel de paisaje.
+
+En este caso, no estaríamos hablando de una unidad homogénea, como podría ser un bosque o un pastizal, si no de un conjunto de estos "parches". Por tanto, es evidente que al poner el foco en esta escala espacial, y considerar varias unidades ecológicas diferentes, el conjunto tendrá mayor diversidad cuanta mayor diferencia haya en la composición de especies de cada uno de los ecosistemas o nichos ecológicos. Cuantas menos especies compartan cada uno de los ecosistemas, mayor será la diferencia entre estos y, por tanto, mayor será su diversidad total [@magurran2004].
+
+Esta observación es la que llevó a @whittaker1960 al hacer la distinción entre $\alpha$ y $\beta$ diversidad. Una descripción detallada de la evolución de este concepto a lo largo de las décadas (así como de sus diferentes etapas) puede consultarse en @calderón-patrón2012.
+
+En esencia, la diversidad beta es la variación en la composición de especies entre pares de parches (ecosistemas). Esta variación puede deberse principalmente a dos fenómenos diferenetes, pero cuya manifestación a través de un índice de diversidad beta es la misma. Estos son la *tasa de recambio* (*turnover*), que es el cambio en las especies compartidas entre 2 o más comunidades, y el *anidamiento* (*nestling*), que se produce cuando una comunidad contiene especies "heredadas" de otra (de modo que una comunidad contendría a otra).
+
+No existe un único método para calcular la (di)similitud entre dos (o más) comunidades diferentes (o muestras de la misma comunidad), y en la mayoría de los casos la elección entre un método u otro consiste en una decisión arbitraria [@ricotta2017].
+
+En nuestro caso, para calcular este parámetro emplearemos los *índices de disimilitud* (de multiples comunidades) propuestos (o sintetizados) por @chao2016 (además de otros, para poder comparar resultados). Estos son:
+
+-   
+
+En concreto, calcularemos todos los índices integrados en la función `betadiver()` de la librería `vegan` [@oksanen2025]. Esta función emplea como *input* la matriz transpuesta del data frame `abundanacia` empleado (en el apartado anterior) para calcular los índices de diversidad alpha. El nombre de los índices, así como sus respectivas ecuaciones, pueden consultarse empleando la misma función, pero especificando el parámetro `help` como `TRUE` (`vegan::betadiver(help = TRUE)`).
+
+```{r}
+#| label: beta-diversidad
+#| message: false
+#| warning: false
+#| error: false
+
+# 5.2. Beta-diversidad (índices de disimilitud mediante SpadeR)
+# 5.2.1. Generación de la matriz de abundancia transpuesta
+abundancia_t <- t(as.matrix(abundancia))
+
+# 5.2.2. Definimos los índices con los que vamos a calcular la beta diversidad
+nombres <- c("w", "-1", "c", "wb", "r", "I", "e", "t", "me", "j", "sor", "m", "-2", "co", "cc", "g", "-3", "l", "19", "hk", "rlb", "sim", "gl", "z")
+
+# 5.2.3. Aplicar de forma iterativa la función de cálculo de la beta-diversidad
+beta <- lapply(
+  nombres, 
+  function(idx) {
+    # Cálculo del objeto de disimilitud
+    beta_idx <- betadiver(abundancia_t, method = idx)
+    
+    # Cálculo de la disimilitud media (singularidad local ~ LCBD)
+    disimilitud <- rowMeans(as.matrix(beta_idx))
+    
+    # Generación del sf a partir de la capa de vegetación
+    beta_veg <- vegetacion %>%
+      filter(as.character(OBJECTID) %in% names(disimilitud)) %>%
+      mutate(
+        valor = disimilitud[as.character(OBJECTID)],
+        metodo = idx
+      ) %>%
+      select(OBJECTID, valor, metodo, geom)
+    
+    return(beta_veg)
+  }
+)
+
+# 5.2.4. Asignamos los nombres a las capas vectriales generadas
+names(beta) <- nombres
+
+# 5.2.5. Comprobación visual
+mapview(beta[["sor"]], zcol = "valor", layer.name = "Beta Sorensen") +
+  mapview(beta[["j"]], zcol = "valor", layer.name = "Beta Whittaker")
+
+# 5.2.6. Guardado
+st_write(
+  beta[["sor"]],
+  here::here("data/gbif/beta_veg_sor.gpkg"),
+  quiet = TRUE,
+  delete_dsn = TRUE
+)
+
+st_write(
+  beta[["j"]],
+  here::here("data/gbif/beta_veg_j.gpkg"),
+  quiet = TRUE,
+  delete_dsn = TRUE
+)
+```
+
+## Segmentación
+
+Emplear paquete `vtree` para la representación de las zonas homogéneas generadas.
+
+# Resultados
+
+# Discusión
+
+# Bibliografía
+
+El mapa de vegetación cedido por
+
+Descarga del
+
+Tener en cuenta la presencia de pinus halepensis. Una actaución en las áreas incendiadas con predominancia de esta especie puede ser contraproducente [@cabezas]. Siempre es necesario tener en cuenta la propia resiliencia del ecosistema, y como este es capaz de mantener su ciclo de sucesión ecológica @j
