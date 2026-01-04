@@ -312,11 +312,11 @@ Existen principalmente tres métodos para poder obtener el MDS(n):
 # opt_output_files(teselas) <- paste0(here::here("data/lidar/lidar2/norm/"), "{ORIGINALFILENAME}_norm")
 
 # 1.2. Aplicamos de forma iterativa la normalización en cada caso
-teselas_n <- lapply(
+teselas_normalizadas <- lapply(
   names(algoritmos_mde),
   function(nombre) {
     opt_output_files(teselas) <- paste0(here::here(paste0("data/lidar/lidar2/norm/", nombre, "/", nombre, "_", "/")), "{ORIGINALFILENAME}") # Configurar salida del catálogo
-    opt_laz_compression(teselas) # Configurar formato de salida
+    opt_laz_compression(teselas) <- TRUE # Configurar formato comprimido de salida
 
     # Cálculo del MDE
     teselas_n <- lidR::normalize_height(
