@@ -216,63 +216,47 @@ errores <- las_check(teselas, print = TRUE)
 # 4. Cálculo del MDE
 # 4.1. Listamos los algoritmos a emplear
 algoritmos_mde <- list(
-  tin= tin() # ,
+  tin= tin(),
   idw = knnidw(),
   kri = kriging()
 )
 
 # 4.2. Cálculo de los MDEs mediante una función anónima
-mde <- lapply(
-  names(algoritmos_mde),
-  function(nombre) {
-    # Cálculo del MDE
-    mde <- lidR::rasterize_terrain(
+for(nombre in names(algoritmos_mde)) {
+  # Configuramos la escritura en disco
+  opt_output_files(teselas) <- here::here(paste0("data/mde/mde_", nombre))
+  opt_select(teselas) <- "xyz" # Selección de las variables espaciales
+
+  # Cálculo del MDE
+  lidR::rasterize_canopy(
       teselas,
       res = 1,
-      algorithm = algoritmos_mde[[nombre]],
-      pkg = "terra"
+      algorithm = algoritmos_mde[[nombre]]
     )
 
-    plot(mde)
+  # Comprobación visual
+  mde <- terra::rast(paste0("data/mde/mde_", nombre, ".tif"))
+  plot(mde)
 
-    # Recorte a la extensión del AOI
-    mde_rec <- mde %>% 
-      terra::crop(AOI) %>% 
-      terra::mask(AOI)
+  # Recorte a la extensión del AOI
+  mde_rec <- mde %>% 
+    terra::crop(AOI) %>% 
+    terra::mask(AOI)
 
-    plot(mde_rec)
+  plot(mde_rec)
 
-    # Guardado de los rásteres
-    terra::writeRaster(
-      mde,
-      here::here(paste0("data/mde/mde_", nombre, ".tif")),
-      overwrite = TRUE
-    )
-    
-    terra::writeRaster(
-      mde_rec,
-      here::here(paste0("data/mde/mde_", nombre, "_rec.tif")),
-      overwrite = TRUE
-    )
+  # Guardado del ráster recortado  
+  terra::writeRaster(
+    mde_rec,
+    here::here(paste0("data/mde/mde_", nombre, "_rec.tif")),
+    overwrite = TRUE
+  )
 
-    # Lista con los resultados
-    return(list(full = mde, rec = mde_rec))
-  }
-)
-
-# 4.3. Nombramos los elementos de la lista
-names(mde) <- names(algoritmos_mde)
-```
-
-```{r}
-#| message: false
-#| warning: false
-#| error: false
-#| echo: false
-MDE1 <- rast("data/mde/mde_idw_rec.tif")
-MDE2 <- rast("data/mde/mde_tin_rec.tif")
-plot(MDE1)
-plot(MDE2)
+  # Liberamos memoria
+  rm(mde, mde_rec)
+  gc(full = TRUE)
+  terra::tmpFiles(remove = TRUE)
+}
 ```
 
 #### MDS
@@ -329,18 +313,15 @@ Existen principalmente tres métodos para poder obtener el MDS(n):
 #| eval: false
 
 # 1. Normalización del terreno
-# 1.1. Definimos plantilla de salida de las teselas procesadas
-# opt_output_files(teselas) <- paste0(here::here("data/lidar/lidar2/norm/"), "{ORIGINALFILENAME}_norm")
-
 # 1.2. Aplicamos de forma iterativa la normalización en cada caso
 teselas_normalizadas <- lapply(
   names(algoritmos_mde),
   function(nombre) {
+    # Configurar salida del catálogo
     opt_output_files(teselas) <- {
-      dir_p <- here::here("data/lidar/lidar2/norm", nombre)
-      dir.create(dir_p, recursive = TRUE, showWarnings = FALSE)
-      file.path(dir_p, paste0(nombre, "_{ORIGINALFILENAME}"))
-    } # Configurar salida del catálogo
+      dir.create(here::here("data/lidar/lidar2/norm", nombre), recursive = TRUE, showWarnings = FALSE)
+      file.path(here::here("data/lidar/lidar2/norm", nombre), paste0(nombre, "_{ORIGINALFILENAME}"))
+    } 
     opt_laz_compression(teselas) <- TRUE # Configurar formato comprimido de salida
  
     teselas_n <- lidR::normalize_height(teselas, algoritmos_mde[[nombre]]) # Normalización
@@ -377,55 +358,175 @@ algoritmos_mds <- list(
   tin = dsmtin(
     max_edge = 8, 
     highest = FALSE
-  ),
-  pitfree = pitfree(
-    thresholds = c(0, 2, 5, 10, 15), 
-    max_edge = c(0, 1.5), 
-    subcircle = 0.15, 
-    highest = FALSE
-  )
+  ) #,
+  # pitfree = pitfree(                     # pitfree es extremadamente intensivo
+  #   thresholds = c(0, 2, 5, 10, 15), 
+  #   max_edge = c(0, 1.5), 
+  #   subcircle = 0.15, 
+  #   highest = FALSE
+  # )
 )
 
 # 2.3. Calculo de cada uno de los MDS
-mds <- lapply(
-  names(algoritmos_mds),
-  function(nombre) {
-    # Cálculo del MDS
-    mds <- lidR::rasterize_canopy(
+for(nombre in names(algoritmos_mds)) {
+  # Configuramos la escritura en disco
+  opt_output_files(teselas_n) <- here::here(paste0("data/mds/mds_", nombre))
+  opt_select(teselas_n) <- "xyz" # Selección de las variables espaciales
+
+  # Cálculo del MDS
+  lidR::rasterize_canopy(
       teselas_n,
       res = 1,
       algorithm = algoritmos_mds[[nombre]]
     )
 
-    plot(mde)
+  # Comprobación visual
+  mds <- terra::rast(paste0("data/mds/mds_", nombre, ".tif"))
+  plot(mds)
 
-    # Recorte a la extensión del AOI
-    mds_rec <- mds %>% 
-      terra::crop(AOI) %>% 
-      terra::mask(AOI)
+  # Recorte a la extensión del AOI
+  mds_rec <- mds %>% 
+    terra::crop(AOI) %>% 
+    terra::mask(AOI)
 
-    plot(mds_rec)
+  plot(mds_rec)
 
-    # Guardado de los rásteres
-    terra::writeRaster(
-      mds,
-      here::here(paste0("data/mds/mds_", nombre, ".tif")),
-      overwrite = TRUE
+  # Guardado del ráster recortado  
+  terra::writeRaster(
+    mds_rec,
+    here::here(paste0("data/mds/mds_", nombre, "_rec.tif")),
+    overwrite = TRUE
+  )
+
+  # Liberamos memoria
+  rm(mds, mds_rec)
+  gc(full = TRUE)
+  terra::tmpFiles(remove = TRUE)
+}
+```
+
+#### Métricas del dosel
+
+Detección/segmentación de árboles individuales. [Algortimos de segmentación de arboles](https://github.com/Jean-Romain/lidRplugins)
+
+```{r}
+#| label: individual-tree
+
+# 1. Detección individual de árboles
+for(i in seq(3, 6, by = 1)) {
+  # Detección individual de árboles
+  itd <- locate_trees(
+    las = teselas_n,
+    algorithm = lmf(
+      ws = i,
+      shape = "circular"
     )
-    
-    terra::writeRaster(
-      mds_rec,
-      here::here(paste0("data/mds/mds_", nombre, "_rec.tif")),
-      overwrite = TRUE
-    )
+  )
 
-    # Lista con los resultados
-    return(list(full = mds, rec = mds_rec))
-  }
+  # Guardado de la capa
+  sf::st_write(
+    itd,
+    here::here(paste0("data/it/itd/itd_ws", i, ".gpkg")), 
+    quiet = TRUE,
+    delete_dsn = TRUE
+  )
+
+  # Limpiamos memoria
+  rm(itd)
+  gc()
+}
+
+# 2. Segmentación individual de árboles
+# 2.1. Lista de algoritmos a emplear
+chm  <- terra::rast("data/mds/mds_tin_rec.tif")
+treetop <- terra::rast("data/it/itd/itd_ws5.gpkg")
+
+algoritmos_its <- list(
+  dalponte = dalponte2016(
+    chm = chm,
+    treetop = 
+  ),
+  watershed = watershed(
+    chm = chm
+  ),
+  li = li2012(),
+  silva = silva2016(
+    chm = chm
+  )
 )
 
-# 2.4. Nombramos los elementos de la lista
-names(mds) <- names(algoritmos_mds)
+# 2.2. Cálculo iterativo
+for(nombre in algoritmos_it) {
+  # Cálculo del ITS
+  its <- segment_trees(
+    teselas_n,
+    algorithm = nombre,
+    attribute = "treeID"
+  )
+
+  # Cálculo de las copas
+  crown <- crown_metrics(
+    its,
+    func = NULL,
+    geom = "convex"
+  )
+
+  # Guardado de las capas
+  sf::st_write(
+    its,
+    here::here(paste0("data/it/its/its_", nombre, ".gpkg")), 
+    quiet = TRUE,
+    delete_dsn = TRUE
+  )
+
+  sf::st_write(
+    crown,
+    here::here(paste0("data/it/crown/crown_", nombre, ".gpkg")), 
+    quiet = TRUE,
+    delete_dsn = TRUE
+  )
+
+  # Limpiamos memoria
+  rm(its, crown)
+  gc()
+}
+```
+
+**Métricas del dosel**
+
+![Comparación en los tiempo de ejecución (*benchmark*) de los distintos algoritmos de `lidRmetrics` (ejecutados sobre la función `pixel_metrics()`](images/unnamed-chunk-4-1.svg)
+
+```{r}
+# 1. Cálculo de las "métricas del dosel"
+# 1.1. Dispersión (Metrics characterizing the dispersion of point heights)
+dispersion <- pixel_metrics(
+  teselas_n,
+  ~metrics_dispersion(z = Z, dz = 2, zmax = 56.5),
+  res = 1
+)
+
+# 1.2. Rugosidad
+rugosidad <- pixel_metrics(
+  teselas_n,
+  ~metrics_rumple(x = X, y = Y, z = Z, pixel_size = 1),
+  res = 1
+)
+
+# 1.3. Textura (Generates a suite of GLCM (Grey-Level Co-Occurence Matrix) metrics of a canopy height model (CHM))
+textura <- pixel_metrics(
+  teselas_n,
+  ~metrics_texture(x = X, y = Y, z = Z, pixel_size = 1),
+  res = 1
+)
+
+# 2. Guardado de las capas
+for(md in c("dispersion", "rugosidad", "textura")){
+  writeRaster(
+    get(md),
+    here::here(paste0("data/md/", md, ".tif")),
+    overwrite = TRUE
+  )
+}
 ```
 
 ### Mapa de vegetación
