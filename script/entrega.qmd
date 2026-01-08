@@ -38,13 +38,6 @@ library(lidRmetrics)
 options(
   terra.progress = 0
 )
-
-# Configurar para que no aparezca
-# Moverlo a otro bloque en el que se especifiquen, y luego se inserte el objeto en la funcion de rgbif
-# 1.4. Configuración de `rgbif`
-options(gbif_user = "jrraya")
-options(gbif_pwd = "JRaul2412-")
-options(gbif_email = "a02racaj@uco.es")
 ```
 
 ```{r}
@@ -133,7 +126,7 @@ st_write(
 
 ### Mapa de severidad
 
-### Variables topológicas
+### LiDAR
 
 #### MDE
 
@@ -423,6 +416,9 @@ for(i in seq(3, 6, by = 1)) {
     )
   )
 
+  # Reestablecemos le conteo de copas
+  itd$treeID <- 1:nrow(itd)
+
   # Guardado de la capa
   sf::st_write(
     itd,
@@ -437,37 +433,42 @@ for(i in seq(3, 6, by = 1)) {
 }
 
 # 2. Segmentación individual de árboles
-# 2.1. Lista de algoritmos a emplear
+# 2.1. Carga de archivos y configuración necesaria
 chm  <- terra::rast("data/mds/mds_tin_rec.tif")
-treetop <- terra::rast("data/it/itd/itd_ws5.gpkg")
+treetop <- sf::st_read("data/it/itd/itd_ws5.gpkg")
+treetop$treeID <- 1:nrow(treetop)
+# opt_output_files(teselas_n) <- here::here("data/it/its/segmentado_{XLEFT}_{YBOTTOM}")
+opt_laz_compression(teselas_n) <- TRUE 
 
+# 2.2. Lista de algoritmos a emplear
 algoritmos_its <- list(
   dalponte = dalponte2016(
     chm = chm,
-    treetop = 
+    treetop = treetop
   ),
   watershed = watershed(
     chm = chm
   ),
   li = li2012(),
   silva = silva2016(
-    chm = chm
+    chm = chm,
+    treetop = treetop
   )
 )
 
 # 2.2. Cálculo iterativo
-for(nombre in algoritmos_it) {
+for(nombre in names(algoritmos_its)) {
   # Cálculo del ITS
   its <- segment_trees(
     teselas_n,
-    algorithm = nombre,
+    algorithm = algoritmos_its[[nombre]],
     attribute = "treeID"
   )
 
   # Cálculo de las copas
   crown <- crown_metrics(
     its,
-    func = NULL,
+    func = .stdmetrics_z,
     geom = "convex"
   )
 
@@ -497,35 +498,42 @@ for(nombre in algoritmos_it) {
 ![Comparación en los tiempo de ejecución (*benchmark*) de los distintos algoritmos de `lidRmetrics` (ejecutados sobre la función `pixel_metrics()`](images/unnamed-chunk-4-1.svg)
 
 ```{r}
-# 1. Cálculo de las "métricas del dosel"
-# 1.1. Dispersión (Metrics characterizing the dispersion of point heights)
-dispersion <- pixel_metrics(
-  teselas_n,
-  ~metrics_dispersion(z = Z, dz = 2, zmax = 56.5),
-  res = 1
+#| label: metricas-dosel
+#| message: false
+#| warning: false
+#| error: false
+
+# 1. Creamos la lista de métricas
+metricas <- list(
+  dispersion = ~metrics_dispersion(z = Z, dz = 2, zmax = 56.5),
+  rugosidad = ~metrics_rumple(x = X, y = Y, z = Z, pixel_size = 1),
+  textura = ~metrics_texture(x = X, y = Y, z = Z, pixel_size = 1)
 )
 
-# 1.2. Rugosidad
-rugosidad <- pixel_metrics(
-  teselas_n,
-  ~metrics_rumple(x = X, y = Y, z = Z, pixel_size = 1),
-  res = 1
-)
-
-# 1.3. Textura (Generates a suite of GLCM (Grey-Level Co-Occurence Matrix) metrics of a canopy height model (CHM))
-textura <- pixel_metrics(
-  teselas_n,
-  ~metrics_texture(x = X, y = Y, z = Z, pixel_size = 1),
-  res = 1
-)
-
-# 2. Guardado de las capas
-for(md in c("dispersion", "rugosidad", "textura")){
-  writeRaster(
-    get(md),
-    here::here(paste0("data/md/", md, ".tif")),
-    overwrite = TRUE
+# 2. Cálculo iterativo de las métricas
+for(metrica in names(metricas)) {
+  # Calcular métrica
+  md <- pixel_metrics(
+    teselas_n,
+    func = metricas[[metrica]],
+    res = 2
   )
+
+  # Recortar a la extensión del AOI
+  md_rec <- md %>% 
+    terra::crop(AOI) %>% 
+    terra::mask(AOI)
+
+  # Guardado de la métrica del dosel
+  terra::writeRaster(
+    md_rec,
+    here::here(paste0("data/md/", metrica, ".tif"))
+  )
+
+  # Liberar memoria
+  rm(md, md_rec)
+  gc(full = TRUE)
+  terra::tmpFiles(remove = TRUE)
 }
 ```
 
