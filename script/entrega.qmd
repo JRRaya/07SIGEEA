@@ -32,7 +32,12 @@ gc(full = TRUE)
 # 1.2.1. En R
 pacman::p_load(sf, terra, stringr, dplyr, tidyr, tidyverse, trend, here, ggplot2, ggridges, viridis, patchwork, tidyterra, mapview, stars, whitebox, reticulate, rgbif, vegan, betapart, adespatial, iNEXT, SpadeR, lidR, lidRmetrics)
 # devtools::install_github("ptompalski/lidRmetrics")
-library(lidRmetrics)
+
+# 1.2.2. Asegurar disponibilidad del gestor de paquetes `BioConductor`, así como la librería `EBImage`
+if (!requireNamespace("EBImage", quietly = TRUE)) {
+  if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+  BiocManager::install("EBImage")
+}
 
 # 1.3. Configuración de `terra`: suprimir las barras de progreso
 options(
@@ -437,7 +442,7 @@ for(i in seq(3, 6, by = 1)) {
 chm  <- terra::rast("data/mds/mds_tin_rec.tif")
 treetop <- sf::st_read("data/it/itd/itd_ws5.gpkg")
 treetop$treeID <- 1:nrow(treetop)
-# opt_output_files(teselas_n) <- here::here("data/it/its/segmentado_{XLEFT}_{YBOTTOM}")
+opt_output_files(teselas_n) <- here::here("data/it/its/segmentado_{XLEFT}_{YBOTTOM}")
 opt_laz_compression(teselas_n) <- TRUE 
 
 # 2.2. Lista de algoritmos a emplear
@@ -465,6 +470,9 @@ for(nombre in names(algoritmos_its)) {
     attribute = "treeID"
   )
 
+  # Cambiar configuración del catálogo para el procesamiento de las copas
+  opt_output_files(its) <- ""
+
   # Cálculo de las copas
   crown <- crown_metrics(
     its,
@@ -472,23 +480,19 @@ for(nombre in names(algoritmos_its)) {
     geom = "convex"
   )
 
+  # Recorte a la extensión del AOI
+  crown_rec <- sf::st_crop(crown, AOI)
+
   # Guardado de las capas
   sf::st_write(
-    its,
-    here::here(paste0("data/it/its/its_", nombre, ".gpkg")), 
-    quiet = TRUE,
-    delete_dsn = TRUE
-  )
-
-  sf::st_write(
-    crown,
-    here::here(paste0("data/it/crown/crown_", nombre, ".gpkg")), 
+    crown_rec,
+    here::here(paste0("data/it/its/crown_", nombre, ".gpkg")), 
     quiet = TRUE,
     delete_dsn = TRUE
   )
 
   # Limpiamos memoria
-  rm(its, crown)
+  rm(its, crown, crown_rec)
   gc()
 }
 ```
