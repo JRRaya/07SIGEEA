@@ -30,7 +30,7 @@ gc(full = TRUE)
 
 # 1.2. Cargamos las librerías a emplear
 # 1.2.1. En R
-pacman::p_load(sf, terra, stringr, dplyr, tidyr, tidyverse, trend, here, ggplot2, ggridges, viridis, patchwork, tidyterra, mapview, stars, whitebox, reticulate, rgbif, vegan, betapart, adespatial, iNEXT, SpadeR, lidR, lidRmetrics)
+pacman::p_load(sf, terra, stringr, dplyr, tidyr, tidyverse, trend, here, ggplot2, ggridges, viridis, patchwork, tidyterra, mapview, stars, whitebox, reticulate, rgbif, vegan, betapart, adespatial, iNEXT, SpadeR, lidR, lidRmetrics, rstac)
 # devtools::install_github("ptompalski/lidRmetrics")
 
 # 1.2.2. Asegurar disponibilidad del gestor de paquetes `BioConductor`, así como la librería `EBImage`
@@ -129,7 +129,140 @@ st_write(
 )
 ```
 
+La fecha de inicio del incendio es el 08/09/2022 (). Por tanto, para poder calcular la severidad del incendio, habrá que recurrir al primer día (es decir, la escena correspondiente a dicha fecha) anterior al incendio que no presente una nubosidad tal que impida el correcto cálculo de los índices que emplearemos para evaluar su severidad.
+
 ### Mapa de severidad
+
+```{r}
+#| label: severidad-incendio
+#| message: false
+#| warning: false
+#| error: false
+
+# 1. Carga y filtrado de escenas
+# 1.1. Búsqueda y selección de escena pre-incendio
+# 1.1.1. Descarga y filtrado de las escenas
+escena_pre <- stac("https://planetarycomputer.microsoft.com/api/stac/v1") %>% # Conexión con catálofo STAC de MPC
+  stac_search(
+    collections = "sentinel-2-l2a",
+    intersects = AOI_4326,
+    datetime = "2022-08-07/2022-09-07"
+  ) %>%
+  post_request() %>% # Enviar petición al servidor
+  items_fetch() %>% # Descarga de los datos
+  {.$features} %>% # Extraer la lista 'FeatureCollection'
+  lapply(function(x) data.frame(
+    id = x$id, # Identificador de la escena
+    fecha = as.Date(substr(x$properties$datetime, 1, 10)), # Fecha
+    nubosidad = x$properties$`eo:cloud_cover`, # Porcentaje de nubosidad
+    feature = I(list(x)) # Guardar objeto completo
+  )) %>%
+  bind_rows() %>% # Convertir todas las escenas en un solo 'df' (tantas filas como features)
+  filter(nubosidad <= 10) %>%
+  arrange(nubosidad, desc(fecha)) %>% # Ordenar por menos nubosidad y más reciente
+  slice(1) %>% # Nos quedamos con la mejor
+  pull(feature) %>% # Extremos columna 'feature'
+  .[[1]] %>% # Extraemos su único elemento
+  items_sign(sign_planetary_computer()) # Obtenemos el objeto de clase 'doc_item'
+
+# 1.2. Búsqueda y selección de escena post-incendio
+# 1.2.1. Descarga y filtrado de las escenas
+escena_post <- stac("https://planetarycomputer.microsoft.com/api/stac/v1") %>% # Conexión con catálofo STAC de MPC
+  stac_search(
+    collections = "sentinel-2-l2a",
+    intersects = AOI_4326,
+    datetime = "2022-09-08/2022-10-08"
+  ) %>%
+  post_request() %>% 
+  items_fetch() %>% 
+  {.$features} %>% 
+  lapply(function(x) data.frame(
+    id = x$id, 
+    fecha = as.Date(substr(x$properties$datetime, 1, 10)), 
+    nubosidad = x$properties$`eo:cloud_cover`, 
+    feature = I(list(x))
+  )) %>%
+  bind_rows() %>% 
+  filter(nubosidad <= 10) %>%
+  arrange(nubosidad, desc(fecha)) %>% 
+  slice(1) %>% 
+  pull(feature) %>% 
+  .[[1]] %>% 
+  items_sign(sign_planetary_computer())
+
+# 1.3. Carga y guardado de las bandas de interés (B08 -NIR- y B12 -SWIR22-)
+bandas <- list(
+  b08_pre = rast(escena_pre$assets$B08$href),
+  b12_pre = rast(escena_pre$assets$B12$href),
+  b08_post = rast(escena_post$assets$B08$href),
+  b12_post = rast(escena_post$assets$B12$href)
+)
+
+# 1.5. Liberamos memoria
+rm(escena_pre, escena_post)
+
+# 2. Preprocesamiento de las imágenes
+# 2.1. Máscara de recorte
+AOI_terra <- vect(AOI) %>% 
+  project("EPSG:32630")
+
+# 2.2. Template para el resto de capas
+template <- bandas$b08_pre %>% 
+  crop(AOI_terra) %>% 
+  project("EPSG:25830", res = 10, method = "lanczos") %>% 
+  mask(AOI)
+
+bandas_procesadas <- lapply(
+  bandas,
+  function(x) {
+    x <- x %>%
+      crop(AOI_terra) %>% 
+      project(template, method = "lanczos") %>% 
+      mask(AOI)
+
+    x <- (x -1000) / 10000 # Devolver la escena corregida: (DN - OFFSET) / SCALE
+
+    return(clamp(x, lower = 0, upper = 1)) 
+  }
+)
+
+# 3. Cálculos de los índices
+# 3.1. Definimos la función de cálculo de índices de vegetación
+vi <- function(i, j) {
+  vi <- (i - j)/(i + j)
+}
+
+# 3.2. Cálculo del 'NBR' [NBR = (NIR - SWIR2)/(NIR + SWIR2)]
+nbr_pre <- vi(bandas_procesadas$b08_pre, bandas_procesadas$b12_pre)
+nbr_post <- vi(bandas_procesadas$b08_post, bandas_procesadas$b12_post)
+
+# 3.3. dNBR
+dnbr <- (nbr_pre - nbr_post) %>% 
+  classify(
+    matrix(
+      c(
+        -Inf, -0.500, 1, # Severidad alta
+        -0.500, -0.250, 2, # Severidad moderada
+        -0.250, -0.100, 3, # Severidad baja
+        -0.100, 0.100, 4, # No quemado
+        0.100, 0.270, 5, # Bajo rebrote posterior al fuego
+        0.270, 0.66, 6, # Alto rebrote posterior al fuego
+        0.66, Inf, 7 # Muy alto rebrote posterior al fuego
+      ),
+      ncol = 3, byrow = TRUE
+    )
+  )
+
+names(dnbr) <- "dNBR"
+
+# 3.4. Comprobación visual
+mapview(dnbr, maxpixels = 1058913)
+
+# 4. Guardado y limpieza de memoria
+writeRaster(nbr_pre, "data/incendios/nbr_pre.tif", overwrite = TRUE)
+writeRaster(nbr_post, "data/incendios/nbr_post.tif", overwrite = TRUE)
+writeRaster(dnbr, "data/incendios/dnbr.tif", overwrite = TRUE)
+```
 
 ### LiDAR
 
@@ -137,7 +270,7 @@ st_write(
 
 Para calcular el *Modelo Digital de Elevaciones* (*MDE*), y sus variables topológicas derivadas (que se calculan de este), vamos a emplear los datos *LiDAR* (*Light Detection and Ranging*) que se encuentran puestos a disposición del público general gracias al IGN. Concretamente, estos datos pueden obtenerse en su [*Centro de Descargas*](https://centrodedescargas.cnig.es/CentroDescargas/home).
 
-Para el procesamiento y manejo de estos datos LiDAR emplearemos el paquete `lidR` [@roussel2025]. En el libro dedicado a la librería [@roussel], redactado por el mismo creador que esta, viene especificado como calcular las métricas que emplearemos en nuestro análisis.
+Para el procesamiento y manejo de estos datos LiDAR emplearemos el paquete `lidR` [@roussel2025]. En el libro dedicado a la librería [@roussel], redactado por el mismo creador de esta, viene especificado como calcular las métricas que emplearemos en nuestro análisis.
 
 Para empezar, tendremos que obtener una *clasificación de suelo*, que consiste, como su porpio nombre indica, en clasificar los puntos de la nube que corresponden a *suelo* y a *no suelo*. Este es un paso previo a la generación del MDE.
 
@@ -295,7 +428,7 @@ Existen principalmente tres métodos para poder obtener el MDS(n):
 
     Para evitar este problema, es común recurrir a un suavizado del CHM en una fase de postprocesamiento.
 
-    De nuevo, se puede recurrir a la función ya mencionada para calcular el CHM: `chm <- rasterize_canopy(ctg, res = 0.5, algorithm = dsmtin())`. Este método, al igual que el anterior, puede presentar resultados poco coherentes cuando faltan muchos puntos de la nube (como por ejemplo en terrenos que presentan muchas oquedades o masas de agua). En este caso, la solución pasa por configurar el parámetro `max_edge`, que define el número máximo de bordes de un triángulo permitos en una *triangulación de Delaunay*. Por defecto, el valor establecido es `0`, lo que significa que ningún triángulo es eliminado. Por otro lado, con un valor de (por ejemplo) `8` (`chm <- rasterize_canopy(ctg, res = 0.5, algorithm = dsmtin(max_edge = 8))`), los triángulos que contengan bordes con una longitud mayor a 8 serán eliminados (no serán tenidos en cuenta) de la triangulación.
+    De nuevo, se puede recurrir a la función ya mencionada para calcular el CHM: `chm <- rasterize_canopy(ctg, res = 0.5, algorithm = dsmtin())`. Este método, al igual que el anterior, puede presentar resultados poco coherentes cuando faltan muchos puntos de la nube (como por ejemplo en terrenos que presentan muchas oquedades o masas de agua). En este caso, la solución pasa por configurar el parámetro `max_edge`, que define el número máximo de bordes de un triángulo permitos en una [*triangulación de Delaunay*](https://es.wikipedia.org/wiki/Triangulaci%C3%B3n_de_Delaunay). Por defecto, el valor establecido es `0`, lo que significa que ningún triángulo es eliminado. Por otro lado, con un valor de (por ejemplo) `8` (`chm <- rasterize_canopy(ctg, res = 0.5, algorithm = dsmtin(max_edge = 8))`), los triángulos que contengan bordes con una longitud mayor a 8 serán eliminados (no serán tenidos en cuenta) de la triangulación.
 
 -   **Algoritmo sin huecos (*pit-free algortihm*)**: Este es el algoritmo más avanzado (de los que veremos), y evita la generación de huecos (píxeles sin valor de la variable) durante su cálculo, al contrario que los anteriores métodos (los cuáles requerían un "postprocesamiento" para poder solventar este problema).
 
@@ -349,20 +482,20 @@ errores_tin_n <- las_check(teselas_n, print = TRUE)
 
 # 2.2. Especificamos los algoritmos a emplear, así como sus atributos
 algoritmos_mds <- list(
-  p2r = p2r(
-    subcircle = 0.2, 
-    na.fill = tin()
-  ),
-  tin = dsmtin(
-    max_edge = 8, 
-    highest = FALSE
-  ) #,
-  # pitfree = pitfree(                     # pitfree es extremadamente intensivo
-  #   thresholds = c(0, 2, 5, 10, 15), 
-  #   max_edge = c(0, 1.5), 
-  #   subcircle = 0.15, 
+  # p2r = p2r(
+  #   subcircle = 0.2, 
+  #   na.fill = tin()
+  # ),
+  # tin = dsmtin(
+  #   max_edge = 8, 
   #   highest = FALSE
-  # )
+  # ),
+  pitfree = pitfree(                     # pitfree es extremadamente intensivo
+    thresholds = c(0, 2, 5, 10, 15), 
+    max_edge = c(0, 1.5), 
+    subcircle = 0.15, 
+    highest = FALSE
+  )
 )
 
 # 2.3. Calculo de cada uno de los MDS
@@ -633,13 +766,13 @@ AOI_wkt <- st_as_sfc(st_bbox(AOI_4326)) %>%
 # 4.2.1. Lanzamos la consulta a los servidores de GBIF
 consulta <- occ_download(
   pred_within(AOI_wkt),
-  pred_lte("year", 2022), # Todos los registros historicos hassta el año 2022 (inclusive)
+  pred("year", 2022), # Registros del año 2022
   pred("hasCoordinate", TRUE),           # Solo con coordenadas
   pred("hasGeospatialIssue", FALSE),     # Sin problemas espaciales
   format = "SIMPLE_CSV"
 )
 
-# 4.2.2. Pausamos el script hasta que la descaraga este lista
+# 4.2.2. Pausamos el script hasta que la descarga este lista
 occ_download_wait(consulta)
 
 # 4.2.3. Descarga de la consulta en el directorio especificado
@@ -936,9 +1069,5 @@ Emplear paquete `vtree` para la representación de las zonas homogéneas generad
 # Discusión
 
 # Bibliografía
-
-El mapa de vegetación cedido por
-
-Descarga del
 
 Tener en cuenta la presencia de pinus halepensis. Una actaución en las áreas incendiadas con predominancia de esta especie puede ser contraproducente [@cabezas]. Siempre es necesario tener en cuenta la propia resiliencia del ecosistema, y como este es capaz de mantener su ciclo de sucesión ecológica @j
